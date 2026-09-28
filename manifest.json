@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "aziz.hyprforge",
+  "name": "Hyprforge",
+  "version": "1.0.0",
+  "author": "Aziz",
+  "license": "MIT",
+  "description": "A Hyprland studio for Omarchy: live-previewed gaps, borders, theme-palette colors, corners, opacity, blur, shadow, glow, animations with a bezier/spring curve editor, layouts, input, cursor, gestures, per-app rules, profiles, history and every Hyprland option. Open with SUPER+SPACE › Hyprforge or `omarchy-shell hyprforge toggle`.",
+  "kinds": ["panel", "service"],
+  "entryPoints": {
+    "panel": "Panel.qml",
+    "service": "Service.qml"
+  }
+}

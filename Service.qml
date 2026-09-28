@@ -96,7 +96,6 @@ QtObject {
     path: svc.statePath
     blockLoading: true
     printErrors: false
-    atomicWrites: true
     watchChanges: true
     onFileChanged: reload()
   }
@@ -105,10 +104,8 @@ QtObject {
     path: svc.luaPath
     blockLoading: true
     printErrors: false
-    atomicWrites: true
     watchChanges: true
     onFileChanged: reload()
-    onSaved: svc.reloadProc.running = true
   }
 
   property Process baselineProc: Process {
@@ -120,6 +117,14 @@ QtObject {
         try { baseline = JSON.parse(text) } catch (e) {}
         svc.finish(baseline)
       }
+    }
+  }
+
+  // All writes: mktemp + rename, never through a symlink (see SafeWriter.qml).
+  property SafeWriter writer: SafeWriter {
+    onWritten: function(path, ok) {
+      if (path === svc.luaPath && ok) svc.reloadProc.running = true
+      else if (!ok) svc.notify("Could not write " + path, true)
     }
   }
 
@@ -197,9 +202,9 @@ QtObject {
     var p = checked
     checked = null
     if (!p) return
-    stateFile.setText(JSON.stringify(p.state, null, 2) + "\n")
+    writer.write(svc.statePath, JSON.stringify(p.state, null, 2) + "\n")
     appendHistory(p.label, p.state.cfg)
-    luaFile.setText(p.lua)
+    writer.write(svc.luaPath, p.lua)
     notify(p.label, false)
   }
 
@@ -220,7 +225,6 @@ QtObject {
     path: svc.home + "/.config/hypr/hyprforge/history.json"
     blockLoading: true
     printErrors: false
-    atomicWrites: true
     watchChanges: true
     onFileChanged: reload()
   }
@@ -232,7 +236,7 @@ QtObject {
     if (!Array.isArray(h)) h = []
     h.push({ time: Date.now(), label: label, cfg: Engine.normalize(cfg) })
     while (h.length > 60) h.shift()
-    historyFile.setText(JSON.stringify(h) + "\n")
+    writer.write(svc.home + "/.config/hypr/hyprforge/history.json", JSON.stringify(h) + "\n")
   }
 
   function applyProfileTo(state, name) {
@@ -305,7 +309,7 @@ QtObject {
       if (!state.profiles) state.profiles = {}
       state.profiles[n] = { cfg: Engine.normalize(state.cfg), saved: Date.now() }
       state.activeProfile = n
-      svc.stateFile.setText(JSON.stringify(state, null, 2) + "\n")
+      svc.writer.write(svc.statePath, JSON.stringify(state, null, 2) + "\n")
       return "ok"
     }
 

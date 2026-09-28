@@ -112,6 +112,10 @@ o.bind("SUPER + ALT + P", "Next Hyprforge profile", "omarchy-shell hyprforge cyc
   good state is restored automatically. (A reload-time config error can make
   Hyprland draw its error bar, which on some systems freezes the compositor —
   that is why validation happens first.)
+* **File safety.** Every file Hyprforge writes (its state, history, generated
+  Lua and snapshot, the launcher entry, and the one-time `hyprland.lua` edit)
+  is written to a fresh `mktemp` file and renamed into place, so a symlink is
+  never written through, and backups complete before the edit they protect.
 * **Colors never pinned.** Unlike writing `general:col.*` into
   `looknfeel.lua`, palette names keep `omarchy theme set` working.
 * **Omarchy's defaults stay visible.** Changed rows show what the value was

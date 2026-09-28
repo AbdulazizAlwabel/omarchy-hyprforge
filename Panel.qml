@@ -636,7 +636,7 @@ Item {
       ui: { dockLeft: root.dockLeft, showAdvanced: root.showAdvanced }
     }, null, 2) + "\n"
     root.lastStateText = text
-    stateFile.setText(text)
+    writer.write(root.statePath, text)
   }
 
   // Type of any key, for validation: catalogue first, then what Hyprland
@@ -704,7 +704,7 @@ Item {
     recordHistory(root.commitCfg, root.commitLabel)
     root.statusText = "Applying…"
     root.luaWriting = true
-    luaFile.setText(Engine.renderFile(root.commitCfg, { baseline: root.animBaseline }))
+    writer.write(root.luaPath, Engine.renderFile(root.commitCfg, { baseline: root.animBaseline }))
   }
 
   function settle() {
@@ -750,7 +750,7 @@ Item {
     h.push({ time: Date.now(), label: label || "Change", cfg: cfg })
     while (h.length > 60) h.shift()
     root.history = h
-    historyFile.setText(JSON.stringify(h) + "\n")
+    writer.write(root.historyPath, JSON.stringify(h) + "\n")
   }
 
   function afterReload(errors) {
@@ -773,7 +773,7 @@ Item {
       root.commitLabel = "Rolled back"
       saveState(root.lastGood)
       root.luaWriting = true
-      luaFile.setText(Engine.renderFile(root.lastGood, { baseline: root.animBaseline }))
+      writer.write(root.luaPath, Engine.renderFile(root.lastGood, { baseline: root.animBaseline }))
       return
     }
     if (root.commitLabel !== "Rolled back") root.errorText = fresh ? out : ""
@@ -1137,12 +1137,27 @@ Item {
   Timer { id: statusClear; interval: 2600; onTriggered: root.statusText = "" }
   Timer { id: baseTimer; interval: 300; onTriggered: baseFile.reload() }
 
+  // Every file Hyprforge writes goes through this (mktemp + rename, never
+  // through a symlink). The FileViews below are used for reading only.
+  SafeWriter {
+    id: writer
+    onWritten: function(path, ok) {
+      if (path === root.luaPath) {
+        root.luaWriting = false
+        luaFile.reload()
+        if (ok) reloadProc.running = true
+        else { root.committing = false; root.errorText = "Could not write " + root.luaPath }
+      } else if (!ok) {
+        root.errorText = "Could not write " + path
+      }
+    }
+  }
+
   // ============================================================= files
 
   FileView {
     id: stateFile
     path: root.statePath
-    atomicWrites: true
     printErrors: false
     watchChanges: true
     onFileChanged: reload()
@@ -1169,7 +1184,6 @@ Item {
   FileView {
     id: historyFile
     path: root.historyPath
-    atomicWrites: true
     printErrors: false
     watchChanges: true
     onFileChanged: reload()
@@ -1180,13 +1194,10 @@ Item {
   FileView {
     id: luaFile
     path: root.luaPath
-    atomicWrites: true
     printErrors: false
     blockLoading: true
     watchChanges: true
     onFileChanged: { if (!root.luaWriting) reload() }
-    onSaved: { root.luaWriting = false; reloadProc.running = true }
-    onSaveFailed: { root.luaWriting = false; root.committing = false; root.errorText = "Could not write " + root.luaPath }
   }
 
   FileView {

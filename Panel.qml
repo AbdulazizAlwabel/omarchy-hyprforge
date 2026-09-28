@@ -549,19 +549,63 @@ Item {
 
   // ============================================================= hook
 
+  // hyprland.lua is edited only on an explicit Connect/Disconnect click, by a
+  // script that (1) refuses if the file changed since the panel read it,
+  // (2) writes a complete backup to a fresh mktemp file and stops if that
+  // fails, and only then (3) writes the new text to another mktemp file and
+  // renames it over the real file. A dotfile symlink is resolved first, so
+  // the link survives and its target is what gets edited.
+  readonly property string hookScript: [
+    'set -eu',
+    'real=$(readlink -f -- "$1")',
+    '[ -f "$real" ] || { echo "hyprland.lua not found" >&2; exit 3; }',
+    '[ "$(md5sum < "$real" | cut -d" " -f1)" = "$2" ] || { echo "hyprland.lua changed on disk; reopen the panel and try again" >&2; exit 4; }',
+    'dir=$(dirname -- "$real")',
+    'bak=$(mktemp -- "$real.bak.hyprforge-XXXXXX")',
+    'cat -- "$real" > "$bak"',
+    'cmp -s -- "$real" "$bak" || { echo "backup failed" >&2; exit 5; }',
+    'new=$(mktemp -- "$dir/.hyprland.lua.hyprforge-XXXXXX")',
+    'printf "%s" "$3" > "$new"',
+    'chmod --reference="$real" -- "$new" 2>/dev/null || true',
+    'mv -fT -- "$new" "$real"',
+    'printf "%s\\n" "$bak"'
+  ].join("\n")
+
+  property string hookLabel: ""
+
+  function editHook(nextText, label) {
+    var text = hyprlandFile.text()
+    if (!text || hookProc.running) return
+    root.hookLabel = label
+    hookProc.command = ["sh", "-c", root.hookScript, "sh", root.hyprlandPath, Qt.md5(text), nextText]
+    hookProc.running = true
+  }
+
   function connectHook() {
     var text = hyprlandFile.text()
     if (!text || Engine.hasHook(text)) { root.hooked = Engine.hasHook(text); return }
-    Quickshell.execDetached(["cp", "-n", root.hyprlandPath, root.hyprlandPath + ".bak.hyprforge"])
-    hyprlandFile.setText(Engine.addHook(text))
-    root.pendingLabel = "Connected to hyprland.lua"
+    editHook(Engine.addHook(text), "Connected to hyprland.lua")
   }
 
   function disconnectHook() {
     var text = hyprlandFile.text()
     if (!text || !Engine.hasHook(text)) return
-    hyprlandFile.setText(Engine.removeHook(text))
-    root.pendingLabel = "Disconnected from hyprland.lua"
+    editHook(Engine.removeHook(text), "Disconnected from hyprland.lua")
+  }
+
+  Process {
+    id: hookProc
+    stdout: StdioCollector { id: hookOut; waitForEnd: true }
+    stderr: StdioCollector { id: hookErr; waitForEnd: true }
+    onExited: function(code) {
+      hyprlandFile.reload()
+      if (code === 0) {
+        root.pendingLabel = root.hookLabel + "  ·  backup " + String(hookOut.text).trim().replace(root.home, "~")
+        reloadProc.running = true
+      } else {
+        root.errorText = "hyprland.lua was not changed: " + (String(hookErr.text).trim() || ("exit " + code))
+      }
+    }
   }
 
   // ============================================================= preview / persist
@@ -1148,13 +1192,11 @@ Item {
   FileView {
     id: hyprlandFile
     path: root.hyprlandPath
-    atomicWrites: true
     printErrors: false
     watchChanges: true
     blockLoading: true
     onFileChanged: reload()
     onLoaded: root.hooked = Engine.hasHook(text())
-    onSaved: { root.hooked = Engine.hasHook(text()); reloadProc.running = true }
   }
 
   FileView {

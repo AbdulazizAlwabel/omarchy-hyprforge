@@ -54,12 +54,25 @@ QtObject {
     ""
   ].join("\n")
 
-  readonly property string installScript:
-      'if [ -e "$1" ] && ! grep -q "^X-Hyprforge-Managed=true$" "$1"; then exit 0; fi\n'
-    + 'mkdir -p "${1%/*}" || exit 0\n'
-    + 'tmp="$1.hyprforge.new"\n'
-    + 'printf "%s" "$2" > "$tmp" || exit 0\n'
-    + 'if cmp -s "$tmp" "$1"; then rm -f "$tmp"; else mv -f "$tmp" "$1"; fi\n'
+  // Never writes through a symlink or to a predictable path: the temp file
+  // comes from mktemp (exclusive create, random name) in the same directory and
+  // is renamed over the entry, which replaces a link instead of following it.
+  // An existing entry is only replaced when it carries our marker.
+  readonly property string installScript: [
+    'dest=$1',
+    'dir=${dest%/*}',
+    'mkdir -p -- "$dir" || exit 0',
+    '[ -L "$dest" ] && exit 0',
+    'if [ -e "$dest" ] && ! grep -q "^X-Hyprforge-Managed=true$" -- "$dest"; then exit 0; fi',
+    'tmp=$(mktemp -- "$dir/.hyprforge-desktop.XXXXXX") || exit 0',
+    'printf "%s" "$2" > "$tmp" || { rm -f -- "$tmp"; exit 0; }',
+    'chmod 644 -- "$tmp"',
+    'if cmp -s -- "$tmp" "$dest"; then rm -f -- "$tmp"; else mv -fT -- "$tmp" "$dest"; fi'
+  ].join("\n")
+
+  // Removes only our own regular file, never a symlink or someone else's entry.
+  readonly property string removeScript:
+    '[ -L "$1" ] || { grep -q "^X-Hyprforge-Managed=true$" -- "$1" 2>/dev/null && rm -f -- "$1"; }'
 
   property bool installed: false
 
@@ -71,7 +84,7 @@ QtObject {
 
   Component.onDestruction: {
     if (!installed) return
-    Quickshell.execDetached(["sh", "-c", 'grep -q "^X-Hyprforge-Managed=true$" "$1" 2>/dev/null && rm -f "$1"', "sh", desktopDest])
+    Quickshell.execDetached(["sh", "-c", removeScript, "sh", desktopDest])
   }
 
   // ------------------------------------------------------------ headless apply

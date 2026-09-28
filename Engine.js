@@ -500,8 +500,16 @@ function renderBaseCapture(keys) {
     "    local ok, value = pcall(hl.get_config, key)",
     "    if ok then out[#out + 1] = '\"' .. key .. '\":' .. enc(value) end",
     "  end",
-    "  local file = io.open((os.getenv(\"HOME\") or \"\") .. \"/.cache/hyprforge/base.json\", \"w\")",
-    "  if file then file:write(\"{\" .. table.concat(out, \",\") .. \"}\\n\") file:close() end",
+    "  -- Write a randomly named temp file, then rename it into place: a rename",
+    "  -- replaces a symlink at base.json instead of writing through it.",
+    "  local dir = (os.getenv(\"HOME\") or \"\") .. \"/.cache/hyprforge\"",
+    "  local tmp = string.format(\"%s/.base-%d-%d.json\", dir, os.time(), math.random(100000000, 999999999))",
+    "  local file = io.open(tmp, \"w\")",
+    "  if file then",
+    "    file:write(\"{\" .. table.concat(out, \",\") .. \"}\\n\")",
+    "    file:close()",
+    "    if not os.rename(tmp, dir .. \"/base.json\") then os.remove(tmp) end",
+    "  end",
     "end"
   ]
   return lines.join("\n")

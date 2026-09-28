@@ -18,9 +18,11 @@ Open it with **SUPER+SPACE › Hyprforge** or `omarchy-shell hyprforge toggle`.
 **First run — one line, only with your consent.** Hyprforge writes its settings to
 its own file, `~/.config/hypr/hyprforge.lua`. Hyprland only reads that file once
 `~/.config/hypr/hyprland.lua` loads it, so the panel shows a **Connect** button
-the first time. Clicking it adds a single optional-require line (a backup of
-`hyprland.lua` is kept as `hyprland.lua.bak.hyprforge`). Nothing else in your
-config is ever edited, and nothing is changed until you click Connect.
+the first time. Clicking it adds a single optional-require line. A full backup
+(`hyprland.lua.bak.hyprforge-XXXXXX`) is written first, and the edit is skipped
+if the backup fails or the file changed since the panel read it; a symlinked
+dotfile stays a symlink. Nothing else in your config is ever edited, and nothing
+is changed until you click Connect.
 
 Requirements: Omarchy 4 (Quattro) with Hyprland ≥ 0.56 (Lua config) and `lua`
 (already a Hyprland dependency). No network access, no sudo.

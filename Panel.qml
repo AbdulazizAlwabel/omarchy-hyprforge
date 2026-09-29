@@ -102,12 +102,13 @@ Item {
     root.grabFocus = true
     releaseGrab.restart()
     mkdirProc.running = true
-    stateFile.reload()
-    historyFile.reload()
-    hyprlandFile.reload()
-    colorsFile.reload()
-    themeNameFile.reload()
-    baseFile.reload()
+    stateReader.read()
+    historyReader.read()
+    luaReader.read()
+    hyprlandReader.read()
+    colorsReader.read()
+    themeNameReader.read()
+    baseReader.read()
     baselineProc.running = true
     refreshLive()
     monitorsProc.running = true
@@ -507,7 +508,13 @@ Item {
 
   function importFromClipboard() { pasteProc.running = true }
 
+  readonly property int importLimit: 1024 * 1024
+
   function importText(text) {
+    if (String(text).length > root.importLimit) {
+      root.errorText = "The clipboard holds more than 1 MB, which is far too big for a Hyprforge profile."
+      return
+    }
     try {
       var j = JSON.parse(String(text || ""))
       var cfg = j.cfg ? j.cfg : j
@@ -574,7 +581,7 @@ Item {
   property string hookLabel: ""
 
   function editHook(nextText, label) {
-    var text = hyprlandFile.text()
+    var text = root.hyprlandText
     if (!text || hookProc.running) return
     root.hookLabel = label
     hookProc.command = ["sh", "-c", root.hookScript, "sh", root.hyprlandPath, Qt.md5(text), nextText]
@@ -582,13 +589,13 @@ Item {
   }
 
   function connectHook() {
-    var text = hyprlandFile.text()
+    var text = root.hyprlandText
     if (!text || Engine.hasHook(text)) { root.hooked = Engine.hasHook(text); return }
     editHook(Engine.addHook(text), "Connected to hyprland.lua")
   }
 
   function disconnectHook() {
-    var text = hyprlandFile.text()
+    var text = root.hyprlandText
     if (!text || !Engine.hasHook(text)) return
     editHook(Engine.removeHook(text), "Disconnected from hyprland.lua")
   }
@@ -598,7 +605,7 @@ Item {
     stdout: StdioCollector { id: hookOut; waitForEnd: true }
     stderr: StdioCollector { id: hookErr; waitForEnd: true }
     onExited: function(code) {
-      hyprlandFile.reload()
+      hyprlandReader.read()
       if (code === 0) {
         root.pendingLabel = root.hookLabel + "  ·  backup " + String(hookOut.text).trim().replace(root.home, "~")
         reloadProc.running = true
@@ -616,7 +623,7 @@ Item {
     if (!body) return
     root.previewDirty = true
     if (evalProc.running) { root.previewPending = true; return }
-    evalProc.command = ["timeout", "3", "hyprctl", "eval", "local _hyprforge = true\n" + body]
+    evalProc.command = capped(["timeout", "3", "hyprctl", "eval", "local _hyprforge = true\n" + body], 64 * 1024)
     evalProc.running = true
   }
 
@@ -685,7 +692,7 @@ Item {
     root.commitLabel = root.pendingLabel
     root.pendingLabel = ""
     var next = Engine.renderFile(root.commitCfg, { baseline: root.animBaseline })
-    if (next === luaFile.text()) {
+    if (next === root.luaText) {
       saveState(root.commitCfg)
       recordHistory(root.commitCfg, root.commitLabel)
       if (root.previewDirty) reloadProc.running = true
@@ -695,7 +702,7 @@ Item {
     root.statusText = "Checking with Hyprland…"
     var body = Engine.render(root.commitCfg, { baseline: root.animBaseline })
     if (!body) { commitChecked(); return }
-    checkProc.command = ["timeout", "5", "hyprctl", "eval", "local _hyprforge_check = true\n" + body]
+    checkProc.command = capped(["timeout", "5", "hyprctl", "eval", "local _hyprforge_check = true\n" + body], 64 * 1024)
     checkProc.running = true
   }
 
@@ -704,7 +711,8 @@ Item {
     recordHistory(root.commitCfg, root.commitLabel)
     root.statusText = "Applying…"
     root.luaWriting = true
-    writer.write(root.luaPath, Engine.renderFile(root.commitCfg, { baseline: root.animBaseline }))
+    root.pendingLuaText = Engine.renderFile(root.commitCfg, { baseline: root.animBaseline })
+    writer.write(root.luaPath, root.pendingLuaText)
   }
 
   function settle() {
@@ -712,7 +720,7 @@ Item {
     flash(root.commitLabel ? "Applied  ·  " + root.commitLabel : "Applied")
     root.committing = false
     if (root.again) { root.again = false; Qt.callLater(persistNow) }
-    else if (root.stateStale) { root.stateStale = false; stateFile.reload() }
+    else if (root.stateStale) { root.stateStale = false; stateReader.read() }
   }
 
   // An override equal to what Omarchy/your files already set is noise: drop it
@@ -773,7 +781,8 @@ Item {
       root.commitLabel = "Rolled back"
       saveState(root.lastGood)
       root.luaWriting = true
-      writer.write(root.luaPath, Engine.renderFile(root.lastGood, { baseline: root.animBaseline }))
+      root.pendingLuaText = Engine.renderFile(root.lastGood, { baseline: root.animBaseline })
+      writer.write(root.luaPath, root.pendingLuaText)
       return
     }
     if (root.commitLabel !== "Rolled back") root.errorText = fresh ? out : ""
@@ -784,11 +793,16 @@ Item {
     var keys = root.descriptions.length ? root.descriptions.map(function(d) { return d.name }) : Schema.liveKeys()
     var batch = []
     for (var i = 0; i < keys.length; i++) batch.push("getoption " + keys[i])
-    liveProc.command = ["timeout", "5", "hyprctl", "-j", "--batch", batch.join(" ; ")]
+    liveProc.command = capped(["timeout", "5", "hyprctl", "-j", "--batch", batch.join(" ; ")], 4 * 1024 * 1024)
     liveProc.running = true
   }
 
   function refreshClients() { clientsProc.running = true }
+
+  // Cap a command's stdout before it reaches QML (StdioCollector keeps all of it).
+  function capped(cmd, bytes) {
+    return ["sh", "-c", '"$@" | head -c ' + Math.floor(bytes), "sh"].concat(cmd)
+  }
 
   // ============================================================= catalogue
 
@@ -1032,13 +1046,13 @@ Item {
 
   Process {
     id: errorsProc
-    command: ["timeout", "5", "hyprctl", "configerrors"]
+    command: root.capped(["timeout", "5", "hyprctl", "configerrors"], 64 * 1024)
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.afterReload(text) }
   }
 
   Process {
     id: initialErrorsProc
-    command: ["timeout", "5", "hyprctl", "configerrors"]
+    command: root.capped(["timeout", "5", "hyprctl", "configerrors"], 64 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1062,7 +1076,7 @@ Item {
 
   Process {
     id: descProc
-    command: ["timeout", "5", "hyprctl", "descriptions", "-j"]
+    command: root.capped(["timeout", "5", "hyprctl", "descriptions", "-j"], 4 * 1024 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1074,7 +1088,7 @@ Item {
 
   Process {
     id: baselineProc
-    command: ["lua", root.pluginDir + "/baseline.lua", root.omarchyPath + "/default/hypr/looknfeel.lua", root.home + "/.config/hypr/looknfeel.lua"]
+    command: root.capped(["lua", root.pluginDir + "/baseline.lua", root.omarchyPath + "/default/hypr/looknfeel.lua", root.home + "/.config/hypr/looknfeel.lua"], 1024 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1085,7 +1099,7 @@ Item {
 
   Process {
     id: monitorsProc
-    command: ["timeout", "5", "hyprctl", "monitors", "-j"]
+    command: root.capped(["timeout", "5", "hyprctl", "monitors", "-j"], 256 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1107,7 +1121,7 @@ Item {
 
   Process {
     id: clientsProc
-    command: ["timeout", "5", "hyprctl", "clients", "-j"]
+    command: root.capped(["timeout", "5", "hyprctl", "clients", "-j"], 2 * 1024 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1129,23 +1143,23 @@ Item {
 
   Process {
     id: pasteProc
-    command: ["wl-paste", "--no-newline"]
+    // One byte past the limit, so an oversized clipboard is detected, not truncated.
+    command: root.capped(["timeout", "5", "wl-paste", "--no-newline"], root.importLimit + 1)
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.importText(text) }
   }
 
   Timer { id: persistTimer; interval: 420; onTriggered: root.persistNow() }
   Timer { id: statusClear; interval: 2600; onTriggered: root.statusText = "" }
-  Timer { id: baseTimer; interval: 300; onTriggered: baseFile.reload() }
+  Timer { id: baseTimer; interval: 300; onTriggered: baseReader.read() }
 
   // Every file Hyprforge writes goes through this (mktemp + rename, never
-  // through a symlink). The FileViews below are used for reading only.
+  // through a symlink). Reading goes through BoundedRead (size-capped).
   SafeWriter {
     id: writer
     onWritten: function(path, ok) {
       if (path === root.luaPath) {
         root.luaWriting = false
-        luaFile.reload()
-        if (ok) reloadProc.running = true
+        if (ok) { root.luaText = root.pendingLuaText; reloadProc.running = true }
         else { root.committing = false; root.errorText = "Could not write " + root.luaPath }
       } else if (!ok) {
         root.errorText = "Could not write " + path
@@ -1153,17 +1167,49 @@ Item {
     }
   }
 
-  // ============================================================= files
+  // The service applies profiles/looks from keybindings; it tells us so we can
+  // re-read instead of watching files.
+  property var service: null
+  Connections {
+    target: root.service
+    ignoreUnknownSignals: true
+    function onStateWritten() { if (root.opened) { stateReader.read(); historyReader.read(); luaReader.read() } }
+  }
 
-  FileView {
-    id: stateFile
+  // Theme switches while the panel is open: poll the tiny theme.name file.
+  Timer {
+    interval: 3000
+    repeat: true
+    running: root.opened
+    onTriggered: themeNameReader.read()
+  }
+
+  // ============================================================= files
+  // Everything read into the shell is size-capped before it reaches QML.
+
+  property string luaText: ""          // what hyprforge.lua currently holds
+  property string pendingLuaText: ""   // what we're writing to it
+  property string hyprlandText: ""     // hyprland.lua, for Connect/Disconnect
+
+  function readFailed(what, status) {
+    if (status === "too-large") root.errorText = what + " is unexpectedly large, so it was not loaded."
+    else if (status === "refused") root.errorText = what + " is not a regular file (a symlink?), so it was not loaded."
+    else if (status === "error") root.errorText = "Could not read " + what + "."
+  }
+
+  BoundedRead {
+    id: stateReader
     path: root.statePath
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: {
-      var raw = text()
-      if (raw === root.lastStateText) return
+    limit: 4 * 1024 * 1024
+    onDone: function(raw, status) {
+      if (status === "missing") { root.stateLoaded = true; return }
+      if (status !== "ok") {
+        // Unreadable state: never save over it.
+        root.stateLoaded = false
+        root.readFailed("~/.config/hypr/hyprforge/state.json", status)
+        return
+      }
+      if (raw === root.lastStateText) { root.stateLoaded = true; return }
       if (root.stateLoaded && (root.committing || root.editing || persistTimer.running)) { root.stateStale = true; return }
       root.lastStateText = raw
       try {
@@ -1178,71 +1224,79 @@ Item {
       root.lastGood = Engine.normalize(root.cfg)
       root.stateLoaded = true
     }
-    onLoadFailed: { root.stateLoaded = true }
   }
 
-  FileView {
-    id: historyFile
+  BoundedRead {
+    id: historyReader
     path: root.historyPath
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: { try { var h = JSON.parse(text()); root.history = Array.isArray(h) ? h : [] } catch (e) { root.history = [] } }
-    onLoadFailed: root.history = []
+    limit: 8 * 1024 * 1024
+    onDone: function(raw, status) {
+      if (status !== "ok") { root.history = []; root.readFailed("history.json", status); return }
+      try { var h = JSON.parse(raw); root.history = Array.isArray(h) ? h : [] } catch (e) { root.history = [] }
+    }
   }
 
-  FileView {
-    id: luaFile
+  BoundedRead {
+    id: luaReader
     path: root.luaPath
-    printErrors: false
-    blockLoading: true
-    watchChanges: true
-    onFileChanged: { if (!root.luaWriting) reload() }
+    limit: 4 * 1024 * 1024
+    onDone: function(raw, status) {
+      if (root.luaWriting) return
+      if (status === "ok" || status === "missing") root.luaText = raw
+      else root.readFailed("~/.config/hypr/hyprforge.lua", status)
+    }
   }
 
-  FileView {
-    id: hyprlandFile
+  BoundedRead {
+    id: hyprlandReader
     path: root.hyprlandPath
-    printErrors: false
-    watchChanges: true
-    blockLoading: true
-    onFileChanged: reload()
-    onLoaded: root.hooked = Engine.hasHook(text())
+    limit: 2 * 1024 * 1024
+    followLinks: true          // may be a dotfiles symlink
+    onDone: function(raw, status) {
+      root.hyprlandText = status === "ok" ? raw : ""
+      root.hooked = status === "ok" ? Engine.hasHook(raw) : true
+      if (status !== "ok" && status !== "missing") root.readFailed("~/.config/hypr/hyprland.lua", status)
+    }
   }
 
-  FileView {
-    id: colorsFile
+  BoundedRead {
+    id: colorsReader
     path: root.themeDir + "/colors.toml"
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: {
-      root.themePalette = Engine.parsePalette(text())
+    limit: 256 * 1024
+    followLinks: true          // Omarchy may link theme files
+    onDone: function(raw, status) {
+      if (status !== "ok") return
+      root.themePalette = Engine.parsePalette(raw)
       root.paletteMap = Engine.paletteMap(root.themePalette)
     }
   }
 
-  FileView {
-    id: themeNameFile
+  BoundedRead {
+    id: themeNameReader
     path: root.home + "/.local/state/omarchy/current/theme.name"
-    printErrors: false
-    watchChanges: true
-    onFileChanged: {
-      reload()
+    limit: 4096
+    followLinks: true
+    onDone: function(raw, status) {
+      if (status !== "ok") return
+      var name = String(raw).trim()
+      if (name === root.themeName) return
+      var changed = root.themeName !== ""
+      root.themeName = name
+      if (!changed) return
       root.wallpaperUrl = "file://" + root.home + "/.local/state/omarchy/current/background?" + Date.now()
-      colorsFile.reload()
+      colorsReader.read()
       if (root.opened) root.refreshLive()
     }
-    onLoaded: root.themeName = String(text()).trim()
   }
 
-  FileView {
-    id: baseFile
+  BoundedRead {
+    id: baseReader
     path: root.basePath
-    printErrors: false
-    onLoaded: {
+    limit: 1024 * 1024
+    onDone: function(raw, status) {
+      if (status !== "ok") return
       try {
-        var b = JSON.parse(text())
+        var b = JSON.parse(raw)
         var out = {}
         for (var k in b) {
           var v = b[k]

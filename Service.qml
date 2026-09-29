@@ -78,6 +78,7 @@ QtObject {
 
   Component.onCompleted: {
     installed = true
+    withState(function(state) { svc.opDone() })
     Quickshell.execDetached(["sh", "-c", installScript, "sh", desktopDest, desktopText])
     Quickshell.execDetached(["mkdir", "-p", home + "/.config/hypr/hyprforge", home + "/.cache/hyprforge"])
   }
@@ -88,28 +89,66 @@ QtObject {
   }
 
   // ------------------------------------------------------------ headless apply
-  property var pending: null
+  //
+  // Script commands run one at a time through a small queue. Each operation
+  // reads state.json fresh (size-capped, see BoundedRead.qml), changes it, and
+  // finishes only after its writes have landed, so the next one never sees
+  // stale data. The panel is told afterwards (stateWritten) and re-reads.
+  signal stateWritten()
 
-  // Watched so the cached text always matches disk: the panel writes this
-  // file too, and acting on a stale copy would undo its changes.
-  property FileView stateFile: FileView {
-    path: svc.statePath
-    blockLoading: true
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
+  property var pending: null
+  property var ops: []
+  property var currentOp: null
+  property bool opBusy: false
+  property var cachedProfiles: []
+
+  function withState(fn) {
+    ops = ops.concat([fn])
+    if (!opBusy) nextOp()
   }
 
-  property FileView luaFile: FileView {
-    path: svc.luaPath
-    blockLoading: true
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
+  function nextOp() {
+    if (ops.length === 0) { opBusy = false; return }
+    opBusy = true
+    currentOp = ops[0]
+    ops = ops.slice(1)
+    stateReader.read()
+  }
+
+  function opDone() {
+    currentOp = null
+    Qt.callLater(nextOp)
+  }
+
+  // null when state.json exists but can't be read or parsed: never overwrite it then.
+  property BoundedRead stateReader: BoundedRead {
+    path: svc.statePath
+    limit: 4 * 1024 * 1024
+    onDone: function(raw, status) {
+      var state = null
+      if (status === "missing" || (status === "ok" && String(raw).trim() === ""))
+        state = { version: Engine.VERSION, cfg: Engine.defaultConfig(), profiles: {} }
+      else if (status === "ok") { try { state = JSON.parse(raw) } catch (e) { state = null } }
+      if (state) svc.cachedProfiles = Object.keys(state.profiles || {}).sort()
+      var fn = svc.currentOp
+      if (fn) fn(state)
+      else svc.opDone()
+    }
+  }
+
+  property BoundedRead historyReader: BoundedRead {
+    path: svc.home + "/.config/hypr/hyprforge/history.json"
+    limit: 8 * 1024 * 1024
+    onDone: function(raw, status) {
+      var h = []
+      if (status === "ok") { try { h = JSON.parse(raw) } catch (e) { h = [] } }
+      else if (status !== "missing") { svc.notify("history.json could not be read; history not updated", true); h = null }
+      svc.historyReady(h)
+    }
   }
 
   property Process baselineProc: Process {
-    command: ["lua", svc.pluginDir + "/baseline.lua", svc.omarchyPath + "/default/hypr/looknfeel.lua", svc.home + "/.config/hypr/looknfeel.lua"]
+    command: svc.capped(["lua", svc.pluginDir + "/baseline.lua", svc.omarchyPath + "/default/hypr/looknfeel.lua", svc.home + "/.config/hypr/looknfeel.lua"], 1024 * 1024)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -121,14 +160,29 @@ QtObject {
   }
 
   // All writes: mktemp + rename, never through a symlink (see SafeWriter.qml).
+  // The Lua file is always the last write of an operation.
   property SafeWriter writer: SafeWriter {
     onWritten: function(path, ok) {
-      if (path === svc.luaPath && ok) svc.reloadProc.running = true
-      else if (!ok) svc.notify("Could not write " + path, true)
+      if (!ok) svc.notify("Could not write " + path, true)
+      if (path === svc.luaPath) {
+        if (ok) svc.reloadProc.running = true
+        svc.stateWritten()
+        svc.opDone()
+      } else if (path === svc.statePath && svc.stateOnlyOp) {
+        svc.stateOnlyOp = false
+        svc.stateWritten()
+        svc.opDone()
+      }
     }
   }
+  property bool stateOnlyOp: false
 
   property Process reloadProc: Process { command: ["timeout", "8", "hyprctl", "reload"] }
+
+  // Cap a command's stdout before it reaches QML (StdioCollector keeps all of it).
+  function capped(cmd, bytes) {
+    return ["sh", "-c", '"$@" | head -c ' + Math.floor(bytes), "sh"].concat(cmd)
+  }
 
   property var pendingSet: null
   property Process checkProc: Process {
@@ -149,23 +203,16 @@ QtObject {
     }
   }
 
-  // null when state.json exists but can't be parsed: never overwrite it then.
-  function readState() {
-    stateFile.reload()
-    var raw = stateFile.text()
-    if (!raw || raw.trim() === "") return { version: Engine.VERSION, cfg: Engine.defaultConfig(), profiles: {} }
-    try { return JSON.parse(raw) } catch (e) { return null }
-  }
-
   // mutate(state) edits the parsed state in place and returns a label, or ""
-  // to abort.
+  // to change nothing. Queued; returns immediately.
   function run(mutate) {
-    var state = readState()
-    if (!state) { notify("state.json is unreadable; nothing was changed", true); return "error" }
-    var label = mutate(state)
-    if (!label) return "unknown"
-    pending = { state: state, label: label }
-    baselineProc.running = true
+    withState(function(state) {
+      if (!state) { svc.notify("state.json is unreadable; nothing was changed", true); svc.opDone(); return }
+      var label = mutate(state)
+      if (!label) { svc.opDone(); return }
+      svc.pending = { state: state, label: label }
+      svc.baselineProc.running = true
+    })
     return "ok"
   }
 
@@ -180,30 +227,42 @@ QtObject {
     Quickshell.execDetached(["notify-send", "-a", "Hyprforge", "-t", critical ? "6000" : "1800"].concat(critical ? ["-u", "critical"] : []).concat(["Hyprforge", text]))
   }
 
-  // validate -> `hyprctl eval` dry-run -> write state + lua -> reload
+  // validate -> `hyprctl eval` dry-run -> write state + history + lua -> reload
   function finish(baseline) {
     if (!pending) return
     var p = pending
     pending = null
     p.state.cfg = Engine.normalize(p.state.cfg)
     var problems = Engine.validate(p.state.cfg, typeOf)
-    if (problems.length) { notify("Not applied: " + problems[0].key + " " + problems[0].problem, true); return }
+    if (problems.length) { notify("Not applied: " + problems[0].key + " " + problems[0].problem, true); opDone(); return }
     p.lua = Engine.renderFile(p.state.cfg, { baseline: baseline })
     var body = Engine.render(p.state.cfg, { baseline: baseline })
     checked = p
     if (!body) { commit(); return }
-    evalCheck.command = ["timeout", "5", "hyprctl", "eval", "local _hyprforge_check = true\n" + body]
+    evalCheck.command = capped(["timeout", "5", "hyprctl", "eval", "local _hyprforge_check = true\n" + body], 64 * 1024)
     evalCheck.running = true
   }
 
   property var checked: null
 
+  // History is read (bounded) before it's appended to; the writes follow in
+  // order: state, history, then the Lua file (which ends the operation).
   function commit() {
+    if (!checked) { opDone(); return }
+    historyReader.read()
+  }
+
+  function historyReady(h) {
     var p = checked
     checked = null
-    if (!p) return
+    if (!p) { opDone(); return }
     writer.write(svc.statePath, JSON.stringify(p.state, null, 2) + "\n")
-    appendHistory(p.label, p.state.cfg)
+    if (h !== null) {
+      if (!Array.isArray(h)) h = []
+      h.push({ time: Date.now(), label: p.label, cfg: Engine.normalize(p.state.cfg) })
+      while (h.length > 60) h.shift()
+      writer.write(svc.home + "/.config/hypr/hyprforge/history.json", JSON.stringify(h) + "\n")
+    }
     writer.write(svc.luaPath, p.lua)
     notify(p.label, false)
   }
@@ -217,26 +276,9 @@ QtObject {
         svc.checked = null
         svc.notify("Hyprland rejected that, nothing was saved: " + t.split("\n").pop(), true)
         svc.reloadProc.running = true
+        svc.opDone()
       }
     }
-  }
-
-  property FileView historyFile: FileView {
-    path: svc.home + "/.config/hypr/hyprforge/history.json"
-    blockLoading: true
-    printErrors: false
-    watchChanges: true
-    onFileChanged: reload()
-  }
-
-  function appendHistory(label, cfg) {
-    historyFile.reload()
-    var h = []
-    try { h = JSON.parse(historyFile.text()) } catch (e) {}
-    if (!Array.isArray(h)) h = []
-    h.push({ time: Date.now(), label: label, cfg: Engine.normalize(cfg) })
-    while (h.length > 60) h.shift()
-    writer.write(svc.home + "/.config/hypr/hyprforge/history.json", JSON.stringify(h) + "\n")
   }
 
   function applyProfileTo(state, name) {
@@ -268,9 +310,10 @@ QtObject {
       })
     }
 
+    // Answers from the last read and refreshes the cache for next time.
     function listProfiles(): string {
-      var state = svc.readState()
-      return state ? Object.keys(state.profiles || {}).sort().join("\n") : "error"
+      svc.withState(function(state) { svc.opDone() })
+      return svc.cachedProfiles.join("\n")
     }
 
     function look(id: string): string {
@@ -304,12 +347,15 @@ QtObject {
     function saveProfile(name: string): string {
       var n = String(name || "").trim()
       if (!n) return "unknown"
-      var state = svc.readState()
-      if (!state) return "error"
-      if (!state.profiles) state.profiles = {}
-      state.profiles[n] = { cfg: Engine.normalize(state.cfg), saved: Date.now() }
-      state.activeProfile = n
-      svc.writer.write(svc.statePath, JSON.stringify(state, null, 2) + "\n")
+      svc.withState(function(state) {
+        if (!state) { svc.notify("state.json is unreadable; profile not saved", true); svc.opDone(); return }
+        if (!state.profiles) state.profiles = {}
+        state.profiles[n] = { cfg: Engine.normalize(state.cfg), saved: Date.now() }
+        state.activeProfile = n
+        svc.cachedProfiles = Object.keys(state.profiles).sort()
+        svc.stateOnlyOp = true
+        svc.writer.write(svc.statePath, JSON.stringify(state, null, 2) + "\n")
+      })
       return "ok"
     }
 
@@ -323,7 +369,7 @@ QtObject {
         return svc.run(function(state) { state.cfg = Engine.normalize(state.cfg); state.cfg.options[key] = v; return key + " = " + value })
       }
       svc.pendingSet = { key: key, value: v, text: value }
-      svc.checkProc.command = ["timeout", "5", "hyprctl", "getoption", key, "-j"]
+      svc.checkProc.command = svc.capped(["timeout", "5", "hyprctl", "getoption", key, "-j"], 64 * 1024)
       svc.checkProc.running = true
       return "ok"
     }

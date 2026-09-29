@@ -27,13 +27,19 @@ Item {
     'set -eu',
     'd=$(dirname -- "$1")',
     'mkdir -p -- "$d"',
+    'n=$(basename -- "$1")',
+    // A write killed mid-flight (e.g. the shell restarting) can't clean up after
+    // itself; remove our own stale temp files first. Exact names only; -delete
+    // removes a symlink itself, never its target.
+    'find "$d" -maxdepth 1 -type f \\( -name ".$n.??????" -o -name ".$n.bak.??????" \\) -mmin +2 -delete 2>/dev/null || true',
     'if [ "$2" = 1 ] && [ -f "$1" ] && [ ! -L "$1" ]; then',
-    '  b=$(mktemp -- "$d/.$(basename -- "$1").bak.XXXXXX")',
+    '  b=$(mktemp -- "$d/.$n.bak.XXXXXX")',
     '  cat -- "$1" > "$b" || { rm -f -- "$b"; exit 1; }',
     '  mv -fT -- "$b" "$1.bak"',
     'fi',
-    't=$(mktemp -- "$d/.$(basename -- "$1").XXXXXX")',
+    't=$(mktemp -- "$d/.$n.XXXXXX")',
     'trap \'rm -f -- "$t"\' EXIT',
+    'trap \'rm -f -- "$t"; exit 1\' INT TERM HUP',
     'cat > "$t"',
     'chmod 644 -- "$t"',
     'mv -fT -- "$t" "$1"',

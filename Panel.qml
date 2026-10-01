@@ -1156,6 +1156,7 @@ Item {
   // through a symlink). Reading goes through BoundedRead (size-capped).
   SafeWriter {
     id: writer
+    tmpDirName: ".hyprforge-tmp"
     onWritten: function(path, ok) {
       if (path === root.luaPath) {
         root.luaWriting = false

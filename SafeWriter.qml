@@ -3,7 +3,8 @@ import Quickshell.Io
 
 // Writes files without ever following a symlink. The content is piped to a
 // fixed shell snippet that creates a fresh mktemp file (exclusive, random name)
-// in the destination directory and renames it over the path. A rename replaces
+// in a private temp directory beside the destination and renames it over the
+// path. A rename replaces
 // a symlink at the path instead of writing through it, so a planted link can't
 // redirect the write into another file. Writes are queued and run one at a time;
 // `written(path, ok)` reports each result in order.
@@ -23,21 +24,29 @@ Item {
   property bool active: false
   readonly property bool busy: active || queue.length > 0
 
+  // Temp files live in a private directory next to the destination (same
+  // filesystem, so the final rename stays atomic). Nothing but our own temp
+  // files is ever created there, so cleaning up after a write that was killed
+  // mid-flight never touches a user's files: no wildcard matching beside them.
+  property string tmpDirName: ".safewriter-tmp"
+
   readonly property string script: [
     'set -eu',
     'd=$(dirname -- "$1")',
     'mkdir -p -- "$d"',
-    'n=$(basename -- "$1")',
-    // A write killed mid-flight (e.g. the shell restarting) can't clean up after
-    // itself; remove our own stale temp files first. Exact names only; -delete
-    // removes a symlink itself, never its target.
-    'find "$d" -maxdepth 1 -type f \\( -name ".$n.??????" -o -name ".$n.bak.??????" \\) -mmin +2 -delete 2>/dev/null || true',
+    'td="$d/$3"',
+    '[ -L "$td" ] && exit 1',
+    'mkdir -p -m 700 -- "$td"',
+    '[ -d "$td" ] && [ ! -L "$td" ] || exit 1',
+    // stale temps from writes killed mid-flight; only inside our private dir
+    'find "$td" -mindepth 1 -maxdepth 1 -type f -mmin +2 -delete 2>/dev/null || true',
     'if [ "$2" = 1 ] && [ -f "$1" ] && [ ! -L "$1" ]; then',
-    '  b=$(mktemp -- "$d/.$n.bak.XXXXXX")',
+    '  b=$(mktemp -- "$td/bak.XXXXXX")',
     '  cat -- "$1" > "$b" || { rm -f -- "$b"; exit 1; }',
+    '  chmod 644 -- "$b"',
     '  mv -fT -- "$b" "$1.bak"',
     'fi',
-    't=$(mktemp -- "$d/.$n.XXXXXX")',
+    't=$(mktemp -- "$td/new.XXXXXX")',
     'trap \'rm -f -- "$t"\' EXIT',
     'trap \'rm -f -- "$t"; exit 1\' INT TERM HUP',
     'cat > "$t"',
@@ -57,7 +66,7 @@ Item {
     var job = queue[0]
     queue = queue.slice(1)
     proc.job = job
-    proc.command = ["sh", "-c", script, "sh", job.path, job.backup ? "1" : "0"]
+    proc.command = ["sh", "-c", script, "sh", job.path, job.backup ? "1" : "0", tmpDirName]
     proc.running = true
   }
 

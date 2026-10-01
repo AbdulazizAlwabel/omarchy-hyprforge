@@ -162,6 +162,7 @@ QtObject {
   // All writes: mktemp + rename, never through a symlink (see SafeWriter.qml).
   // The Lua file is always the last write of an operation.
   property SafeWriter writer: SafeWriter {
+    tmpDirName: ".hyprforge-tmp"
     onWritten: function(path, ok) {
       if (!ok) svc.notify("Could not write " + path, true)
       if (path === svc.luaPath) {
